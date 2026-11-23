@@ -28,12 +28,25 @@ class AppConfig:
     default_mmr_fetch_k: int
     default_mmr_lambda: float
     default_rerank_top_n: int
+    hf_token: str | None = None
+    groq_api_key: str | None = None
+    groq_model_name: str | None = None
 
     def require_embedding_model_name(self) -> str:
         return _require_model_name("EMBEDDING_MODEL_NAME", self.embedding_model_name)
 
     def require_cross_encoder_model_name(self) -> str:
         return _require_model_name("CROSS_ENCODER_MODEL_NAME", self.cross_encoder_model_name)
+
+    def require_groq_model_name(self) -> str:
+        return _require_model_name("GROQ_MODEL_NAME", self.groq_model_name)
+
+    def require_groq_api_key(self) -> str:
+        if self.groq_api_key is None:
+            raise ConfigurationError(
+                "GROQ_API_KEY is not set. Set it in .env before initializing the Groq client."
+            )
+        return self.groq_api_key
 
 
 def _optional_env(name: str) -> str | None:
@@ -81,6 +94,9 @@ def load_config() -> AppConfig:
         default_mmr_fetch_k=_int_env("DEFAULT_MMR_FETCH_K", 12),
         default_mmr_lambda=_float_env("DEFAULT_MMR_LAMBDA", 0.5),
         default_rerank_top_n=_int_env("DEFAULT_RERANK_TOP_N", 15),
+        hf_token=_optional_env("HF_TOKEN"),
+        groq_api_key=_optional_env("GROQ_API_KEY"),
+        groq_model_name=_optional_env("GROQ_MODEL_NAME"),
     )
     logger.info("event=config_loaded")
     return config
