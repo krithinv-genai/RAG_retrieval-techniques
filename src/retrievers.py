@@ -185,6 +185,7 @@ def retrieve_reranked(
     cross_encoder_model_name: str | None = None,
     *,
     config: AppConfig | None = None,
+    cross_encoder_model: HuggingFaceCrossEncoder | None = None,
 ) -> list[RetrievalHit]:
     """Retrieve dense candidates, then re-order them with a Hugging Face cross-encoder.
 
@@ -208,15 +209,16 @@ def retrieve_reranked(
     if not candidates:
         return []
 
-    model_name = cross_encoder_model_name or settings.require_cross_encoder_model_name()
-    model_kwargs = {"token": settings.hf_token} if settings.hf_token else {}
-    cross_encoder = HuggingFaceCrossEncoder(
-        model_name=model_name,
-        model_kwargs=model_kwargs,
-    )
+    if cross_encoder_model is None:
+        model_name = cross_encoder_model_name or settings.require_cross_encoder_model_name()
+        model_kwargs = {"token": settings.hf_token} if settings.hf_token else {}
+        cross_encoder_model = HuggingFaceCrossEncoder(
+            model_name=model_name,
+            model_kwargs=model_kwargs,
+        )
     # CrossEncoderReranker computes pairwise query/document relevance and sorts
     # descending; only the best k candidates are retained.
-    reranker = CrossEncoderReranker(model=cross_encoder, top_n=result_count)
+    reranker = CrossEncoderReranker(model=cross_encoder_model, top_n=result_count)
     reranked_documents = reranker.compress_documents(candidates, query)
     hits = [
         _hit(
