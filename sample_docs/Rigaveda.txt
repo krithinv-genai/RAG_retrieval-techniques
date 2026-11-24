@@ -1,0 +1,17 @@
+DOCUMENT_ID: VEDA-01-RIGVEDA
+TITLE: Rigveda Samhita - Overview, Structure, and Key Themes
+CATEGORY: Sacred Hindu Texts / Vedic Literature
+CHRONOLOGY: Early Vedic Period (circa 1500-1200 BCE, oral tradition predating compilation)
+LANGUAGE: Vedic Sanskrit
+
+[SECTION 1: ORIGIN AND STRUCTURE]
+The Rigveda is the oldest and foundational text among the four Vedas. It is composed of 1,028 hymns (suktas) arranged into ten books known as Mandalas. Mandalas 2 through 7 are traditionally called the "family books" because each is attributed to a specific sage lineage (rishi family), while Mandalas 1 and 10 are generally considered later additions that broaden the thematic and philosophical scope of the collection. The hymns are primarily metrical compositions designed for recitation during ritual invocations.
+
+[SECTION 2: COSMIC DEITIES AND NATURAL FORCES]
+Early Rigvedic hymns frequently personify natural phenomena and cosmic order (Rta). Agni, the sacred sacrificial fire, acts as a messenger between humans and deities and is invoked in hundreds of hymns. Indra is celebrated as a storm and war deity associated with rain, strength, and breaking cosmic obstruction. Ushas represents the dawn and renewal of daily order, while Varuna and Mitra are closely linked with cosmic law, oaths, and moral accountability.
+
+[SECTION 3: PHILOSOPHICAL AND COSMOLOGICAL HYMNS]
+Later layers of the Rigveda introduce reflective questioning about creation and ultimate reality. The Nasadiya Sukta (Rigveda 10.129) speculates on the state before creation—neither existence nor non-existence—and questions whether even the highest observer knows the origin of the cosmos. The Purusha Sukta (Rigveda 10.90) describes cosmic sacrifice and links social roles symbolically to parts of a primeval cosmic being, marking an important bridge toward later Vedic social and ritual thought.
+
+[SECTION 4: SOCIAL LIFE AND PASTORAL ECONOMY]
+The hymns reflect a predominantly pastoral and semi-sedentary society where cattle wealth, chariotry, kinship clans (jana), and assemblies (sabha and samiti) play central roles. Poetry, eloquence, hospitality, and ritual precision are highly valued, alongside accounts of inter-clan conflicts such as the Battle of the Ten Kings (Dasharajna).
