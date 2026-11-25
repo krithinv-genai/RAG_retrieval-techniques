@@ -258,7 +258,7 @@ def main() -> None:
             ("Sample docs/", "Uploaded .txt files"),
         )
         uploaded_files = st.file_uploader(
-            "Upload one or more .txt files",
+            "Upload one or Upto 3 .txt files",
             accept_multiple_files=True,
             type=["txt"],
         )
