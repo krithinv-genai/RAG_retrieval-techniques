@@ -206,7 +206,7 @@ def _render_grounded_synthesis(
 ) -> None:
     st.subheader("Grounded Synthesis & Citation Audit")
     if config.groq_api_key and config.groq_model_name:
-        st.caption("Synthesis uses Groq with temperature 0.")
+        st.caption("Synthesis uses Groq API Models.")
     else:
         st.caption("Groq settings are incomplete; using the local extractive fallback.")
     synthesis_columns = st.columns(4)
@@ -225,7 +225,8 @@ def _render_grounded_synthesis(
             st.write(validated_answer)
             if audit_passed:
                 st.success(
-                    "Citation audit passed: zero uncited factual claims were retained."
+                    "Citation format check passed: each retained sentence has a valid "
+                    "source citation. Whether the source supports each claim is not checked."
                 )
             else:
                 st.error("Citation audit changed the answer to remove ungrounded text.")
