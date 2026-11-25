@@ -31,6 +31,7 @@ class AppConfig:
     hf_token: str | None = None
     groq_api_key: str | None = None
     groq_model_name: str | None = None
+    default_hybrid_alpha: float = 0.5
 
     def require_embedding_model_name(self) -> str:
         return _require_model_name("EMBEDDING_MODEL_NAME", self.embedding_model_name)
@@ -85,6 +86,9 @@ def _require_model_name(name: str, value: str | None) -> str:
 
 def load_config() -> AppConfig:
     load_dotenv(_PROJECT_ROOT / ".env")
+    hybrid_alpha = _float_env("DEFAULT_HYBRID_ALPHA", 0.5)
+    if not 0.0 <= hybrid_alpha <= 1.0:
+        raise ConfigurationError("DEFAULT_HYBRID_ALPHA must be between 0 and 1.")
     config = AppConfig(
         embedding_model_name=_optional_env("EMBEDDING_MODEL_NAME"),
         cross_encoder_model_name=_optional_env("CROSS_ENCODER_MODEL_NAME"),
@@ -94,6 +98,7 @@ def load_config() -> AppConfig:
         default_mmr_fetch_k=_int_env("DEFAULT_MMR_FETCH_K", 12),
         default_mmr_lambda=_float_env("DEFAULT_MMR_LAMBDA", 0.5),
         default_rerank_top_n=_int_env("DEFAULT_RERANK_TOP_N", 15),
+        default_hybrid_alpha=hybrid_alpha,
         hf_token=_optional_env("HF_TOKEN"),
         groq_api_key=_optional_env("GROQ_API_KEY"),
         groq_model_name=_optional_env("GROQ_MODEL_NAME"),

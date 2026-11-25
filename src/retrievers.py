@@ -1,4 +1,5 @@
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ from langchain_classic.retrievers.document_compressors import CrossEncoderRerank
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import FAISS
+from langchain_core.cross_encoders import BaseCrossEncoder
 from langchain_core.documents import Document
 
 from src.config import AppConfig, load_config
@@ -177,24 +179,57 @@ def retrieve_mmr(
     return hits
 
 
-def retrieve_reranked(
+class _RecordingCrossEncoder(BaseCrossEncoder):
+    """Capture scores while letting CrossEncoderReranker perform the sorting."""
+
+    def __init__(self, model: HuggingFaceCrossEncoder) -> None:
+        self.model = model
+        self.scores: list[float] = []
+
+    def score(self, text_pairs: list[tuple[str, str]]) -> list[float]:
+        self.scores = [float(score) for score in self.model.score(text_pairs)]
+        if len(self.scores) != len(text_pairs):
+            raise ValueError("Cross-encoder returned an unexpected number of scores.")
+        return self.scores
+
+
+def _normalize_scores(scores: list[float], *, higher_is_better: bool) -> list[float]:
+    if not scores:
+        return []
+    if not all(math.isfinite(score) for score in scores):
+        raise ValueError("Retrieval scores must be finite numbers.")
+
+    minimum = min(scores)
+    maximum = max(scores)
+    if minimum == maximum:
+        return [1.0] * len(scores)
+    if higher_is_better:
+        return [(score - minimum) / (maximum - minimum) for score in scores]
+    return [(maximum - score) / (maximum - minimum) for score in scores]
+
+
+def _document_identity(document: Document) -> tuple[str, ...]:
+    chunk_id = document.metadata.get("chunk_id")
+    if chunk_id is not None and str(chunk_id):
+        return "chunk_id", str(chunk_id)
+    source_file = document.metadata.get("source_file", "unknown")
+    chunk_index = document.metadata.get("chunk_index", "unknown")
+    return "source_file", str(source_file), str(chunk_index)
+
+
+def retrieve_hybrid_reranked(
     vector_store: FAISS,
+    sparse_retriever: BM25Retriever,
     query: str,
     k: int | None = None,
     top_n: int | None = None,
+    alpha: float | None = None,
     cross_encoder_model_name: str | None = None,
     *,
     config: AppConfig | None = None,
     cross_encoder_model: HuggingFaceCrossEncoder | None = None,
 ) -> list[RetrievalHit]:
-    """Retrieve dense candidates, then re-order them with a Hugging Face cross-encoder.
-
-    The cross-encoder jointly scores each query/chunk pair, which is more precise
-    than embedding-only comparison but requires extra inference for every
-    candidate. Candidate retrieval stays dense and bounded by top_n to control
-    that cost. CrossEncoderReranker returns order but omits its raw scores, so
-    score is None rather than a misleading rank-derived numeric value.
-    """
+    """Fuse dense and sparse candidates, then re-rank them with a cross-encoder."""
     settings = _settings(config)
     result_count = _positive_limit(
         "k", k if k is not None else settings.default_top_k
@@ -204,11 +239,102 @@ def retrieve_reranked(
     )
     if candidate_count < result_count:
         raise ValueError("top_n must be greater than or equal to k.")
+    alpha_weight = settings.default_hybrid_alpha if alpha is None else alpha
+    if not 0.0 <= alpha_weight <= 1.0:
+        raise ValueError("alpha must be between 0 and 1.")
 
-    candidates = vector_store.similarity_search(query, k=candidate_count)
-    if not candidates:
+    # Stage 1 — retrieve and normalize both ranked lists, then fuse by chunk.
+    dense_results = vector_store.similarity_search_with_score(
+        query,
+        k=candidate_count,
+    )
+    dense_scores = _normalize_scores(
+        [float(score) for _, score in dense_results],
+        higher_is_better=False,
+    )
+    query_tokens = sparse_retriever.preprocess_func(query)
+    sparse_scores = sparse_retriever.vectorizer.get_scores(query_tokens)
+    sparse_ranked_indices = sorted(
+        range(len(sparse_retriever.docs)),
+        key=lambda index: sparse_scores[index],
+        reverse=True,
+    )[:candidate_count]
+    sparse_documents = [
+        sparse_retriever.docs[index] for index in sparse_ranked_indices
+    ]
+    sparse_raw_scores = [
+        float(sparse_scores[index]) for index in sparse_ranked_indices
+    ]
+    normalized_sparse_scores = _normalize_scores(
+        sparse_raw_scores,
+        higher_is_better=True,
+    )
+
+    documents_by_id: dict[tuple[str, ...], Document] = {}
+    component_scores: dict[tuple[str, ...], dict[str, float]] = {}
+    dense_ranks: dict[tuple[str, ...], int] = {}
+    sparse_ranks: dict[tuple[str, ...], int] = {}
+    for rank, ((document, _), score) in enumerate(
+        zip(dense_results, dense_scores, strict=True),
+        start=1,
+    ):
+        identity = _document_identity(document)
+        documents_by_id.setdefault(identity, document)
+        dense_ranks.setdefault(identity, rank)
+        components = component_scores.setdefault(
+            identity,
+            {"dense_score": 0.0, "sparse_score": 0.0},
+        )
+        components["dense_score"] = max(components["dense_score"], score)
+
+    for rank, (document, score) in enumerate(
+        zip(sparse_documents, normalized_sparse_scores, strict=True),
+        start=1,
+    ):
+        identity = _document_identity(document)
+        documents_by_id.setdefault(identity, document)
+        sparse_ranks.setdefault(identity, rank)
+        components = component_scores.setdefault(
+            identity,
+            {"dense_score": 0.0, "sparse_score": 0.0},
+        )
+        components["sparse_score"] = max(components["sparse_score"], score)
+
+    fused_candidates: list[
+        tuple[Document, float, float, float, tuple[str, ...]]
+    ] = []
+    for identity, document in documents_by_id.items():
+        components = component_scores[identity]
+        hybrid_score = (
+            alpha_weight * components["dense_score"]
+            + (1.0 - alpha_weight) * components["sparse_score"]
+        )
+        fused_candidates.append(
+            (
+                document,
+                hybrid_score,
+                components["dense_score"],
+                components["sparse_score"],
+                identity,
+            )
+        )
+
+    def fusion_sort_key(
+        candidate: tuple[Document, float, float, float, tuple[str, ...]],
+    ) -> tuple[float, int]:
+        identity = candidate[4]
+        if alpha_weight == 0.0:
+            return candidate[1], -sparse_ranks.get(identity, candidate_count + 1)
+        if alpha_weight == 1.0:
+            return candidate[1], -dense_ranks.get(identity, candidate_count + 1)
+        return candidate[1], 0
+
+    fused_candidates.sort(key=fusion_sort_key, reverse=True)
+    fused_candidates = fused_candidates[:candidate_count]
+    if not fused_candidates:
         return []
 
+    # Stage 2 — use the standard reranker ordering and capture its scores in one pass.
     if cross_encoder_model is None:
         model_name = cross_encoder_model_name or settings.require_cross_encoder_model_name()
         model_kwargs = {"token": settings.hf_token} if settings.hf_token else {}
@@ -216,18 +342,44 @@ def retrieve_reranked(
             model_name=model_name,
             model_kwargs=model_kwargs,
         )
-    # CrossEncoderReranker computes pairwise query/document relevance and sorts
-    # descending; only the best k candidates are retained.
-    reranker = CrossEncoderReranker(model=cross_encoder_model, top_n=result_count)
-    reranked_documents = reranker.compress_documents(candidates, query)
-    hits = [
-        _hit(
+    recording_model = _RecordingCrossEncoder(cross_encoder_model)
+    reranker = CrossEncoderReranker(
+        model=recording_model,
+        top_n=result_count,
+    )
+    fused_documents = [candidate[0] for candidate in fused_candidates]
+    reranked_documents = reranker.compress_documents(fused_documents, query)
+    cross_encoder_scores = {
+        id(document): score
+        for document, score in zip(
+            fused_documents,
+            recording_model.scores,
+            strict=True,
+        )
+    }
+    candidate_details = {
+        id(document): (hybrid_score, dense_score, sparse_score)
+        for document, hybrid_score, dense_score, sparse_score, _ in fused_candidates
+    }
+    hits: list[RetrievalHit] = []
+    for rank, document in enumerate(reranked_documents, start=1):
+        hit = _hit(
             document,
             rank,
-            None,
-            "Cross-encoder reranked order (score unavailable)",
+            cross_encoder_scores[id(document)],
+            "Cross-Encoder Score",
         )
-        for rank, document in enumerate(reranked_documents, start=1)
-    ]
-    logger.info("event=reranked_retrieval_complete result_count=%d", len(hits))
+        hybrid_score, dense_score, sparse_score = candidate_details[id(document)]
+        hit.metadata["retrieval_debug"] = {
+            "hybrid_score": hybrid_score,
+            "dense_score": dense_score,
+            "sparse_score": sparse_score,
+            "alpha": alpha_weight,
+        }
+        hits.append(hit)
+    logger.info(
+        "event=hybrid_reranked_retrieval_complete result_count=%d alpha=%.2f",
+        len(hits),
+        alpha_weight,
+    )
     return hits

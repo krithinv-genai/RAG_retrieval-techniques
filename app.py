@@ -1,5 +1,6 @@
 import hashlib
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -28,8 +29,8 @@ from src.ingestion import (
 from src.retrievers import (
     RetrievalHit,
     retrieve_dense,
+    retrieve_hybrid_reranked,
     retrieve_mmr,
-    retrieve_reranked,
     retrieve_sparse,
 )
 
@@ -38,7 +39,7 @@ PANEL_NAMES = (
     "Dense Search (FAISS)",
     "Sparse Search (BM25)",
     "MMR Search",
-    "Dense + Re-Ranked",
+    "Hybrid (α) + Re-Ranked",
 )
 METADATA_FIELDS = ("source_file", "chunk_id", "chunk_index", "document_title")
 SourceItem = str | tuple[str, bytes]
@@ -113,31 +114,6 @@ def _digest_named_files(files: tuple[tuple[str, bytes], ...]) -> str:
     return digest.hexdigest()
 
 
-def _resolve_local_paths(path_text: str) -> tuple[Path, ...]:
-    paths: list[Path] = []
-    for value in path_text.splitlines():
-        candidate = Path(value.strip()).expanduser()
-        if not value.strip():
-            continue
-        if candidate.is_dir():
-            paths.extend(
-                sorted(
-                    path.resolve()
-                    for path in candidate.rglob("*")
-                    if path.is_file() and path.suffix.lower() == ".txt"
-                )
-            )
-        elif candidate.is_file() and candidate.suffix.lower() == ".txt":
-            paths.append(candidate.resolve())
-        else:
-            raise FileNotFoundError(
-                f"Expected an existing .txt file or folder containing .txt files: {candidate}"
-            )
-    if not paths:
-        raise ValueError("Select at least one existing local .txt file or folder.")
-    return tuple(paths)
-
-
 def _local_source_bundle(paths: tuple[Path, ...]) -> tuple[str, SourceItems, str]:
     named_content = tuple((path.name, path.read_bytes()) for path in paths)
     return "local", tuple(str(path) for path in paths), _digest_named_files(named_content)
@@ -146,7 +122,6 @@ def _local_source_bundle(paths: tuple[Path, ...]) -> tuple[str, SourceItems, str
 def _collect_source_bundle(
     source_mode: str,
     uploaded_files: list[Any],
-    local_path_text: str,
 ) -> tuple[str, SourceItems, str] | None:
     if source_mode == "Sample docs/":
         sample_dir = PROJECT_ROOT / "sample_docs"
@@ -160,11 +135,6 @@ def _collect_source_bundle(
         if not paths:
             raise ValueError(f"No .txt files found in {sample_dir}.")
         return _local_source_bundle(paths)
-
-    if source_mode == "Local .txt files":
-        if not local_path_text.strip():
-            return None
-        return _local_source_bundle(_resolve_local_paths(local_path_text))
 
     if source_mode == "Uploaded .txt files":
         if not uploaded_files:
@@ -180,12 +150,21 @@ def _render_hit(hit: RetrievalHit, source_number: int) -> None:
     chunk_index = hit.metadata.get("chunk_index", "unknown")
     with st.container(border=True):
         st.markdown(f"**Rank:** {hit.rank}")
-        if hit.score is None:
+        if hit.score_label == "Cross-Encoder Score" and hit.score is not None:
+            st.text(f"Cross-Encoder Score: {hit.score:.4f}")
+        elif hit.score is None:
             st.text(f"Similarity / Relevance Score: {hit.score_label}")
         else:
             st.text(
                 f"Similarity / Relevance Score: {hit.score:.4f} "
                 f"({hit.score_label})"
+            )
+        retrieval_debug = hit.metadata.get("retrieval_debug")
+        if isinstance(retrieval_debug, dict):
+            st.caption(
+                "Hybrid fusion score: "
+                f"{retrieval_debug['hybrid_score']:.4f} "
+                f"(α={retrieval_debug['alpha']:.2f})"
             )
         st.text(
             f"Citation Reference: [SRC-{source_number}] | "
@@ -193,7 +172,12 @@ def _render_hit(hit: RetrievalHit, source_number: int) -> None:
         )
         st.text(hit.content)
         with st.expander("Metadata"):
-            st.json({field: hit.metadata.get(field) for field in METADATA_FIELDS})
+            metadata = {
+                field: hit.metadata.get(field) for field in METADATA_FIELDS
+            }
+            if isinstance(retrieval_debug, dict):
+                metadata["retrieval_debug"] = retrieval_debug
+            st.json(metadata)
 
 
 def _render_retrieval_panels(
@@ -271,19 +255,13 @@ def main() -> None:
         st.title("RAG Controls")
         source_mode = st.radio(
             "Document Source",
-            ("Sample docs/", "Uploaded .txt files", "Local .txt files"),
+            ("Sample docs/", "Uploaded .txt files"),
         )
         uploaded_files = st.file_uploader(
             "Upload one or more .txt files",
             accept_multiple_files=True,
             type=["txt"],
         )
-        local_path_text = ""
-        if source_mode == "Local .txt files":
-            local_path_text = st.text_area(
-                "Local .txt file paths or folders (one per line)",
-                placeholder="C:\\path\\to\\documents\\\nC:\\path\\to\\notes.txt",
-            )
 
         st.subheader("Models & API")
         embedding_model_name = st.text_input(
@@ -356,12 +334,22 @@ def main() -> None:
                 step=1,
             )
         )
+        hybrid_alpha = st.slider(
+            "Alpha Weight (α)",
+            min_value=0.0,
+            max_value=1.0,
+            value=min(max(config.default_hybrid_alpha, 0.0), 1.0),
+            step=0.05,
+        )
+        st.caption(
+            "1.0 = Pure Dense (Semantic) | 0.5 = Balanced Hybrid | "
+            "0.0 = Pure Sparse (BM25)"
+        )
 
     try:
         source_bundle = _collect_source_bundle(
             source_mode,
             uploaded_files or [],
-            local_path_text,
         )
     except (FileNotFoundError, OSError, ValueError) as exc:
         source_bundle = None
@@ -407,10 +395,12 @@ def main() -> None:
         default_mmr_fetch_k=max(config.default_mmr_fetch_k, top_k),
         default_mmr_lambda=mmr_lambda,
         default_rerank_top_n=rerank_top_n,
+        default_hybrid_alpha=hybrid_alpha,
     )
 
     results: dict[str, list[RetrievalHit]] = {name: [] for name in PANEL_NAMES}
     errors: dict[str, str] = {}
+    inference_started = time.perf_counter()
     results["Sparse Search (BM25)"] = retrieve_sparse(
         bm25_retriever,
         query,
@@ -455,30 +445,39 @@ def main() -> None:
                     cross_encoder_model_name,
                     config.hf_token,
                 )
-                results["Dense + Re-Ranked"] = retrieve_reranked(
+                results["Hybrid (α) + Re-Ranked"] = retrieve_hybrid_reranked(
                     vector_store,
+                    bm25_retriever,
                     query,
                     k=top_k,
                     top_n=rerank_top_n,
+                    alpha=hybrid_alpha,
                     config=active_config,
                     cross_encoder_model=cross_encoder,
                 )
             except (ImportError, OSError, ValueError) as exc:
-                errors["Dense + Re-Ranked"] = (
+                errors["Hybrid (α) + Re-Ranked"] = (
                     f"Cross-encoder unavailable: {type(exc).__name__}: {exc}"
                 )
         else:
-            errors["Dense + Re-Ranked"] = (
+            errors["Hybrid (α) + Re-Ranked"] = (
                 "Enter CROSS_ENCODER_MODEL_NAME to enable re-ranking."
             )
     else:
         errors["Dense Search (FAISS)"] = vector_store_error or "FAISS is unavailable."
         errors["MMR Search"] = vector_store_error or "FAISS is unavailable."
-        errors["Dense + Re-Ranked"] = vector_store_error or "FAISS is unavailable."
+        errors["Hybrid (α) + Re-Ranked"] = (
+            vector_store_error or "FAISS is unavailable."
+        )
 
     _render_retrieval_panels(results, errors)
     st.divider()
     _render_grounded_synthesis(results, active_config, query)
+    elapsed_seconds = time.perf_counter() - inference_started
+    st.caption(
+        f"Inference completed in {elapsed_seconds:.2f} seconds "
+        f"({elapsed_seconds / 60:.2f} minutes)."
+    )
 
 
 if __name__ == "__main__":
