@@ -158,27 +158,4 @@ substituted with another retrieval strategy.
 | `.env.example` | Names of supported environment settings and their example defaults |
 | `pyproject.toml` / `requirements.txt` | Python runtime and package dependencies |
 
-## 5. Diagram-Generation Prompt
-
-Paste the following prompt into an image-generation or diagram-generation LLM:
-
-> Create a clean, readable system architecture diagram for a Python Streamlit
-> RAG retrieval-comparison demo. Show the user selecting local sample TXT files
-> or uploading TXT files, setting model/retrieval parameters, and submitting a
-> question. Show the ingestion flow: load text, attach source metadata, split
-> into overlapping character chunks, then build a BM25 index and (when an
-> embedding model is configured) an in-memory FAISS index. Show the query
-> branching into four independent strategies: BM25 sparse search, FAISS dense
-> search, FAISS MMR, and hybrid retrieval that fuses normalized BM25 and dense
-> scores using alpha, deduplicates candidates, then applies an optional
-> cross-encoder reranker. Each strategy returns ranked chunks with metadata and
-> citation IDs. Show each result list independently flowing to grounded
-> synthesis: Groq chat model at temperature 0 when configured, otherwise a
-> deterministic first-sentence extractive fallback. Then show citation-format
-> validation and the Streamlit UI displaying answers, retrieved chunks, scores,
-> and citation references. Include error/disabled branches for missing
-> embedding or cross-encoder configuration. Mark caches as in-process runtime
-> caches, not persistent storage. Do not depict agents, MCP, LangGraph, a remote
-> vector database, or persistent chat memory; those are not implemented in this
-> project. Use directional arrows, group ingestion/indexing separately from
-> online query/retrieval/synthesis, and keep labels concise.
+---

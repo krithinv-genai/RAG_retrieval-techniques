@@ -7,6 +7,7 @@ from typing import Any
 from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_community.retrievers import BM25Retriever
+from langchain_community.utils.math import cosine_similarity
 from langchain_community.vectorstores import FAISS
 from langchain_core.cross_encoders import BaseCrossEncoder
 from langchain_core.documents import Document
@@ -146,9 +147,12 @@ def retrieve_mmr(
     """Return relevance/diversity-balanced FAISS results using MMR.
 
     MMR first fetches a candidate pool, then greedily selects chunks that balance
-    query relevance with dissimilarity to chunks already selected. Higher
-    lambda_mult favors relevance; lower values favor diversity, which can reduce
-    redundant passages but may include less directly relevant evidence.
+    query relevance with dissimilarity to chunks already selected. For later
+    selections, the score is lambda_mult * query_similarity minus
+    (1 - lambda_mult) * maximum_similarity_to_selected. A value of 1 favors
+    relevance, 0 favors diversity, and 0.5 balances both. The first chunk is
+    always the most query-similar candidate; its displayed score uses zero
+    diversity penalty.
     """
     settings = _settings(config)
     count = _positive_limit("k", k if k is not None else settings.default_top_k)
@@ -163,18 +167,44 @@ def retrieve_mmr(
     if not 0.0 <= relevance_weight <= 1.0:
         raise ValueError("lambda_mult must be between 0 and 1.")
 
-    # MMR returns the chosen order but no comparable per-document score; ranking
-    # conveys selection order and score stays None instead of implying a metric.
-    documents = vector_store.max_marginal_relevance_search(
-        query,
+    query_embedding = vector_store._embed_query(query)
+    documents = vector_store.max_marginal_relevance_search_by_vector(
+        query_embedding,
         k=count,
         fetch_k=candidate_count,
         lambda_mult=relevance_weight,
     )
-    hits = [
-        _hit(document, rank, None, "MMR selection rank (score unavailable)")
-        for rank, document in enumerate(documents, start=1)
-    ]
+    document_embeddings = vector_store._embed_documents(
+        [document.page_content for document in documents]
+    )
+    query_similarities = cosine_similarity(
+        [query_embedding],
+        document_embeddings,
+    )[0]
+    selected_embeddings: list[list[float]] = []
+    hits: list[RetrievalHit] = []
+    for rank, (document, embedding) in enumerate(
+        zip(documents, document_embeddings, strict=True),
+        start=1,
+    ):
+        diversity_similarity = (
+            float(max(cosine_similarity([embedding], selected_embeddings)[0]))
+            if selected_embeddings
+            else 0.0
+        )
+        mmr_score = (
+            relevance_weight * query_similarities[rank - 1]
+            - (1.0 - relevance_weight) * diversity_similarity
+        )
+        hits.append(
+            _hit(
+                document,
+                rank,
+                float(mmr_score),
+                f"MMR objective score (lambda={relevance_weight:.2f})",
+            )
+        )
+        selected_embeddings.append(embedding)
     logger.info("event=mmr_retrieval_complete result_count=%d", len(hits))
     return hits
 

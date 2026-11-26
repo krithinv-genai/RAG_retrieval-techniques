@@ -152,6 +152,11 @@ def _render_hit(hit: RetrievalHit, source_number: int) -> None:
         st.markdown(f"**Rank:** {hit.rank}")
         if hit.score_label == "Cross-Encoder Score" and hit.score is not None:
             st.text(f"Cross-Encoder Score: {hit.score:.4f}")
+        elif (
+            hit.score_label.startswith("MMR objective score")
+            and hit.score is not None
+        ):
+            st.text(f"{hit.score_label}: {hit.score:.4f}")
         elif hit.score is None:
             st.text(f"Similarity / Relevance Score: {hit.score_label}")
         else:
@@ -320,11 +325,16 @@ def main() -> None:
             )
         )
         mmr_lambda = st.slider(
-            "MMR Lambda (relevance ↔ diversity)",
+            "MMR Lambda (diversity ↔ relevance)",
             min_value=0.0,
             max_value=1.0,
             value=min(max(config.default_mmr_lambda, 0.0), 1.0),
             step=0.05,
+            help=(
+                "0 prioritizes diversity; 1 prioritizes query relevance; "
+                "0.5 balances both. MMR always selects the most relevant "
+                "chunk first."
+            ),
         )
         rerank_top_n = int(
             st.number_input(
